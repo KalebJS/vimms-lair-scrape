@@ -1,34 +1,74 @@
-# Vimm's Lair Scraper
+# TUI Game Scraper
 
-This script scrapes game links from Vimm’s Lair for personal or educational use, focusing on Xbox game categories and individual game pages. It dynamically builds URLs based on the site structure to avoid errors, making it easy to adapt for other game directories.
+A modern textual user interface application for scraping game metadata and downloading game files from Vimm's Lair.
 
-## How It Works
+## Project Structure
 
-- **Category & Game Link Handling**: Differentiates between category pages (`/vault/Xbox`) and game pages (`/vault/[game_number]`) to build correct URLs.
-- **Adaptable for Other Games**: To scrape other game directories, simply change `xbox_category_url` in the script to a different system, e.g., `/vault/PS2` for PlayStation 2 games.
+```
+src/
+├── __init__.py          # Package initialization
+├── main.py              # Application entry point
+├── models/              # Data models and structures
+│   └── __init__.py
+├── services/            # Business logic and external integrations
+│   └── __init__.py
+└── ui/                  # Textual UI components
+    └── __init__.py
 
-<details>
-  <summary>Usage Instructions</summary>
+tests/                   # Test suite
+└── __init__.py
+```
 
-  1. **Install dependencies**:
-      ```bash
-      pip install requests beautifulsoup4
-      ```
+## Development Setup
 
-  2. **Run the script**:
-      ```bash
-      python script.py
-      ```
+1. Install dependencies:
+   ```bash
+   uv sync
+   ```
 
-</details>
+2. Install development dependencies:
+   ```bash
+   uv add --dev pytest hypothesis mypy pytest-asyncio pytest-cov
+   ```
 
-<details>
-  <summary>Important Notes</summary>
+3. Run the application:
+   ```bash
+   uv run src/main.py
+   ```
 
-  - **Respects Site Limits**: This script does not bypass the download-per-client limit, and bypassing it may not be feasible. However, the script does bypass some bot protections by mimicking regular browser behavior through the use of a `User-Agent` header. Without this header, direct access may result in a block.
+4. Run tests:
+   ```bash
+   uv run pytest
+   ```
 
-  - **Disclaimer**: Use responsibly and in accordance with Vimm’s Lair’s terms of service. While the script is designed with ethical scraping practices in mind, you're responsible for its use.
+5. Run type checking:
+   ```bash
+   uv run mypy src/
+   ```
 
-  - **Proxy Consideration**: It did occur to me to use proxies, but the overhead is annoying to me. Proxies add more variables, such as the need to manage multiple IP addresses and handle potential connection issues or delays. Using proxies can also introduce added complexity with rate limiting, as some IPs might be blocked or flagged more quickly, requiring constant monitoring and adjustments. Additionally, proxies can slow down the scraping process due to network latency, especially if rotating between multiple servers. Overall, while proxies could bypass certain limitations, the added overhead and maintenance make it less practical for my use case.
+## Features
 
-</details>
+- Modern Python 3.12+ with type hints
+- Textual framework for TUI
+- Structured logging with structlog
+- Async HTTP client with httpx
+- Data validation with Pydantic
+- Property-based testing with Hypothesis
+- Comprehensive test coverage
+
+## Requirements
+
+- Python 3.12+
+- uv package manager
+
+---
+
+## Original Script Information
+
+This project is a modernized version of a Vimm's Lair scraper. The original script scraped game links from Vimm's Lair for personal or educational use, focusing on Xbox game categories and individual game pages.
+
+### Important Notes
+
+- **Respects Site Limits**: This application does not bypass download-per-client limits
+- **Disclaimer**: Use responsibly and in accordance with Vimm's Lair's terms of service
+- **Ethical Scraping**: Designed with ethical scraping practices in mind

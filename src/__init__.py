@@ -1,0 +1,1 @@
+"""TUI Game Scraper - A modern textual interface for game scraping and downloading."""
