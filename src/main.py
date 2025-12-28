@@ -82,7 +82,8 @@ class ApplicationContext:
         """Get the HTTP client service (lazy initialization)."""
         if self._http_client is None:
             self._http_client = HttpClientService(
-                rate_limit_delay=self.config.request_delay
+                rate_limit_delay=self.config.request_delay,
+                verify_ssl=False  # Disable SSL verification for macOS compatibility
             )
         return self._http_client
     
@@ -99,7 +100,9 @@ class ApplicationContext:
         if self._game_scraper is None:
             self._game_scraper = GameScraperService(
                 http_client=self.http_client,
-                request_delay=self.config.request_delay
+                request_delay=self.config.request_delay,
+                minimum_score=self.config.minimum_score,
+                concurrent_scrapes=self.config.concurrent_scrapes,
             )
         return self._game_scraper
     
@@ -111,7 +114,6 @@ class ApplicationContext:
                 http_client=self.http_client,
                 filesystem=self.filesystem,
                 download_directory=self.config.download_directory,
-                concurrent_downloads=self.config.concurrent_downloads
             )
         return self._download_manager
     
@@ -294,10 +296,11 @@ def main() -> None:
         # Default to ./logs for production
         log_dir = Path("logs")
     
-    # Set up logging
+    # Set up logging (disable console output in TUI mode to avoid corrupting the interface)
     _ = setup_logging(
         log_level=args.log_level,
-        log_dir=log_dir
+        log_dir=log_dir,
+        tui_mode=not args.no_tui,
     )
     
     log.info(

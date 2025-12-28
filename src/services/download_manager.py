@@ -2,19 +2,24 @@
 
 import asyncio
 import hashlib
+import re
+import shutil
+import tempfile
 import time
 import uuid
+import zipfile
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
 
+import py7zr
 import structlog
 
 from ..models import DiscInfo, DownloadProgress, GameData
-from .errors import DownloadError, FileSystemError as FSError, get_error_service
 from .http_client import HttpClientService
 from .filesystem import FileSystemService
+from .esde_compat import ESDECompatibilityService
 
 log = structlog.stdlib.get_logger()
 
@@ -66,9 +71,10 @@ class DownloadManagerService:
         http_client: HttpClientService,
         filesystem: FileSystemService,
         download_directory: Path,
-        concurrent_downloads: int = 3,
         max_retries: int = 3,
-        chunk_size: int = 8192
+        chunk_size: int = 8192,
+        esde_mode: bool = True,
+        download_delay: float = 2.0,
     ) -> None:
         """Initialize the download manager service.
         
@@ -76,20 +82,27 @@ class DownloadManagerService:
             http_client: HTTP client for making download requests
             filesystem: File system service for file operations
             download_directory: Base directory for downloads
-            concurrent_downloads: Maximum concurrent downloads
             max_retries: Maximum retry attempts for failed downloads
             chunk_size: Size of chunks to read/write in bytes
+            esde_mode: Enable ES-DE compatible folder structure (default: True)
+            download_delay: Delay in seconds between downloads (default: 2.0)
         """
         self._http_client: HttpClientService = http_client
         self._filesystem: FileSystemService = filesystem
         self._download_directory: Path = download_directory
-        self._concurrent_downloads: int = concurrent_downloads
         self._max_retries: int = max_retries
         self._chunk_size: int = chunk_size
+        self._esde_mode: bool = esde_mode
+        self._download_delay: float = download_delay
         
-        # Queue management
+        # Initialize ES-DE compatibility service if enabled
+        self._esde_service: ESDECompatibilityService | None = None
+        if esde_mode:
+            self._esde_service = ESDECompatibilityService(download_directory)
+        
+        # Queue management (sequential processing)
         self._queue: list[DownloadTask] = []
-        self._active_downloads: dict[str, asyncio.Task[None]] = {}
+        self._current_task: DownloadTask | None = None
         
         # State management
         self._is_paused: bool = False
@@ -110,9 +123,22 @@ class DownloadManagerService:
         log.info(
             "Download manager service initialized",
             download_directory=str(download_directory),
-            concurrent_downloads=concurrent_downloads,
-            max_retries=max_retries
+            max_retries=max_retries,
+            esde_mode=esde_mode,
         )
+    
+    @property
+    def esde_mode(self) -> bool:
+        """Check if ES-DE compatibility mode is enabled."""
+        return self._esde_mode
+    
+    @esde_mode.setter
+    def esde_mode(self, value: bool) -> None:
+        """Enable or disable ES-DE compatibility mode."""
+        self._esde_mode = value
+        if value and not self._esde_service:
+            self._esde_service = ESDECompatibilityService(self._download_directory)
+        log.info("ES-DE mode changed", esde_mode=value)
     
     def add_to_queue(self, game: GameData, disc: DiscInfo) -> DownloadTask:
         """Add a download task to the queue.
@@ -127,9 +153,19 @@ class DownloadManagerService:
         # Generate unique task ID
         task_id = f"{game.title}_{disc.disc_number}_{disc.media_id}_{uuid.uuid4().hex[:8]}"
         
-        # Generate destination path
-        safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in game.title)
-        destination = self._download_directory / game.category / safe_title / f"disc_{disc.disc_number}.zip"
+        # Generate destination path based on mode
+        if self._esde_mode and self._esde_service:
+            # ES-DE compatible path: {base}/system_folder/GameTitle.zip
+            destination = self._esde_service.generate_rom_path(
+                vimm_category=game.category,
+                game_title=game.title,
+                disc_number=disc.disc_number,
+                extension=".zip",  # Downloaded as zip, will be extracted
+            )
+        else:
+            # Legacy path: {base}/category/safe_title/disc_X.zip
+            safe_title = "".join(c if c.isalnum() or c in " -_" else "_" for c in game.title)
+            destination = self._download_directory / game.category / safe_title / f"disc_{disc.disc_number}.zip"
         
         task = DownloadTask(
             game=game,
@@ -181,9 +217,8 @@ class DownloadManagerService:
         for i, task in enumerate(self._queue):
             if task.task_id == task_id:
                 if task.status == DownloadStatus.DOWNLOADING:
-                    # Cancel active download
-                    if task_id in self._active_downloads:
-                        self._active_downloads[task_id].cancel()
+                    # Mark for cancellation - current download will check cancel event
+                    task.status = DownloadStatus.CANCELLED
                 
                 self._queue.pop(i)
                 log.info("Download task removed from queue", task_id=task_id)
@@ -194,9 +229,9 @@ class DownloadManagerService:
     
     def clear_queue(self) -> None:
         """Clear all pending tasks from the queue."""
-        # Cancel active downloads
-        for task_id, async_task in self._active_downloads.items():
-            async_task.cancel()
+        # Mark current download as cancelled if running
+        if self._current_task and self._current_task.status == DownloadStatus.DOWNLOADING:
+            self._current_task.status = DownloadStatus.CANCELLED
         
         # Remove pending tasks
         self._queue = [t for t in self._queue if t.status in (DownloadStatus.COMPLETED, DownloadStatus.FAILED)]
@@ -205,7 +240,9 @@ class DownloadManagerService:
 
     
     async def start_downloads(self) -> AsyncIterator[DownloadTask]:
-        """Start processing the download queue.
+        """Start processing the download queue sequentially.
+        
+        Downloads are processed one at a time to respect site rate limits.
         
         Yields:
             Download tasks as they complete or fail
@@ -229,52 +266,34 @@ class DownloadManagerService:
                 # Wait if paused
                 await self._pause_event.wait()
                 
-                # Get pending tasks
-                pending_tasks = [t for t in self._queue if t.status == DownloadStatus.PENDING]
+                # Get next pending task
+                pending_task: DownloadTask | None = None
+                for task in self._queue:
+                    if task.status == DownloadStatus.PENDING:
+                        pending_task = task
+                        break
                 
-                if not pending_tasks and not self._active_downloads:
+                if pending_task is None:
                     log.info("All downloads completed")
                     break
                 
-                # Start new downloads up to concurrent limit
-                while (
-                    len(self._active_downloads) < self._concurrent_downloads
-                    and pending_tasks
-                    and not self._cancel_event.is_set()
-                ):
-                    task = pending_tasks.pop(0)
-                    task.status = DownloadStatus.DOWNLOADING
-                    
-                    async_task = asyncio.create_task(self._download_task(task))
-                    self._active_downloads[task.task_id] = async_task
+                # Process single download
+                self._current_task = pending_task
+                pending_task.status = DownloadStatus.DOWNLOADING
                 
-                # Wait for any download to complete
-                if self._active_downloads:
-                    done, _ = await asyncio.wait(
-                        self._active_downloads.values(),
-                        return_when=asyncio.FIRST_COMPLETED,
-                        timeout=1.0
-                    )
-                    
-                    # Process completed downloads
-                    for completed_task in done:
-                        # Find and yield the corresponding download task
-                        for task_id, async_task in list(self._active_downloads.items()):
-                            if async_task == completed_task:
-                                del self._active_downloads[task_id]
-                                
-                                # Find the download task
-                                for download_task in self._queue:
-                                    if download_task.task_id == task_id:
-                                        yield download_task
-                                        break
-                                break
-                else:
-                    # Small delay to prevent busy waiting
-                    await asyncio.sleep(0.1)
+                await self._download_task(pending_task)
+                
+                self._current_task = None
+                yield pending_task
+                
+                # Add delay between downloads to respect rate limits
+                if self._download_delay > 0 and not self._cancel_event.is_set():
+                    log.debug("Waiting between downloads", delay=self._download_delay)
+                    await asyncio.sleep(self._download_delay)
         
         finally:
             self._is_running = False
+            self._current_task = None
             log.info("Download processing stopped")
     
     async def _download_task(self, task: DownloadTask) -> None:
@@ -284,8 +303,6 @@ class DownloadManagerService:
             task: The download task to execute
         """
         start_time = time.time()
-        last_update_time = start_time
-        last_bytes = 0
         
         log.info(
             "Starting download",
@@ -305,6 +322,21 @@ class DownloadManagerService:
             if task.checksum:
                 if not await self._verify_checksum(task):
                     raise ValueError("Checksum verification failed")
+            
+            # Detect actual archive type by reading file magic bytes
+            actual_archive_type = await self._detect_archive_type(task.destination)
+            
+            # Extract archive files and remove archive
+            if actual_archive_type == "zip":
+                await self._extract_and_cleanup_zip(task)
+            elif actual_archive_type == "7z":
+                await self._extract_and_cleanup_7z(task)
+            elif actual_archive_type:
+                log.warning(
+                    "Unknown archive type, skipping extraction",
+                    task_id=task.task_id,
+                    detected_type=actual_archive_type,
+                )
             
             task.status = DownloadStatus.COMPLETED
             log.info(
@@ -329,14 +361,28 @@ class DownloadManagerService:
             task.retry_count += 1
             task.error_message = str(e)
             
+            # Check if this is a rate limit error (429)
+            is_rate_limited = "429" in str(e) or "Too Many Requests" in str(e)
+            
             if task.retry_count < self._max_retries:
                 task.status = DownloadStatus.PENDING
+                
+                # Exponential backoff for retries, especially for rate limiting
+                if is_rate_limited:
+                    backoff_delay = min(30.0, self._download_delay * (2 ** task.retry_count))
+                else:
+                    backoff_delay = self._download_delay * task.retry_count
+                
                 log.warning(
-                    "Download failed, will retry",
+                    "Download failed, will retry after backoff",
                     task_id=task.task_id,
                     error=str(e),
-                    retry_count=task.retry_count
+                    retry_count=task.retry_count,
+                    backoff_delay=backoff_delay,
                 )
+                
+                # Wait before allowing retry
+                await asyncio.sleep(backoff_delay)
             else:
                 task.status = DownloadStatus.FAILED
                 log.error(
@@ -352,10 +398,298 @@ class DownloadManagerService:
                     task.destination.unlink()
                 except OSError:
                     pass
+    
+    async def _extract_and_cleanup_zip(self, task: DownloadTask) -> None:
+        """Extract a zip file and remove the archive.
+        
+        For ES-DE mode, extracted files are renamed to match the game title
+        with proper disc numbering for multi-disc games.
+        
+        Args:
+            task: The download task with zip file to extract
+        """
+        zip_path = task.destination
+        
+        # Determine extraction directory
+        if self._esde_mode and self._esde_service:
+            extract_dir = self._esde_service.generate_extraction_directory(
+                vimm_category=task.game.category,
+                game_title=task.game.title,
+                disc_number=task.disc.disc_number,
+            )
+        else:
+            extract_dir = zip_path.parent
+        
+        log.info(
+            "Extracting zip archive",
+            task_id=task.task_id,
+            zip_path=str(zip_path),
+            extract_dir=str(extract_dir),
+            esde_mode=self._esde_mode,
+        )
+        
+        try:
+            with zipfile.ZipFile(zip_path, 'r') as zf:
+                extracted_files = zf.namelist()
+                
+                if self._esde_mode and self._esde_service:
+                    # ES-DE mode: rename extracted files to match game title
+                    await self._extract_with_esde_naming(zf, task, extract_dir)
+                else:
+                    # Legacy mode: extract as-is
+                    zf.extractall(extract_dir)
+            
+            log.info(
+                "Zip extraction completed",
+                task_id=task.task_id,
+                files_extracted=len(extracted_files),
+            )
+            
+            # Remove the zip archive
+            zip_path.unlink()
+            log.info(
+                "Zip archive removed",
+                task_id=task.task_id,
+                zip_path=str(zip_path),
+            )
+            
+        except zipfile.BadZipFile as e:
+            log.error(
+                "Failed to extract zip - invalid archive",
+                task_id=task.task_id,
+                error=str(e),
+            )
+            # Don't fail the download, just leave the zip file
+        except Exception as e:
+            log.error(
+                "Failed to extract zip",
+                task_id=task.task_id,
+                error=str(e),
+            )
+            # Don't fail the download, just leave the zip file
+    
+    async def _extract_with_esde_naming(
+        self,
+        zf: zipfile.ZipFile,
+        task: DownloadTask,
+        extract_dir: Path,
+    ) -> None:
+        """Extract zip contents with ES-DE compatible naming.
+        
+        Renames extracted ROM files to match the game title while preserving
+        the original file extension. For multi-disc games, adds disc numbering.
+        
+        Args:
+            zf: Open ZipFile object
+            task: The download task
+            extract_dir: Directory to extract files to
+        """
+        if not self._esde_service:
+            return
+        
+        # Ensure extraction directory exists
+        self._filesystem.ensure_directory(extract_dir)
+        
+        # Get expected extensions for this system
+        expected_extensions = self._esde_service.get_expected_extensions(task.game.category)
+        
+        for member in zf.namelist():
+            # Skip directories
+            if member.endswith('/'):
+                continue
+            
+            original_name = Path(member).name
+            original_ext = Path(member).suffix.lower()
+            
+            # Check if this is a ROM file we should rename
+            is_rom_file = original_ext in expected_extensions or original_ext in (
+                '.iso', '.bin', '.cue', '.chd', '.rvz', '.gcz', '.wbfs',
+                '.nds', '.gba', '.gbc', '.gb', '.nes', '.sfc', '.smc',
+                '.n64', '.z64', '.v64', '.md', '.gen', '.sms', '.gg',
+                '.pce', '.ngp', '.ngc', '.vb', '.a26', '.a52', '.a78',
+                '.j64', '.jag', '.lnx', '.32x', '.cdi', '.gdi',
+            )
+            
+            if is_rom_file:
+                # Generate ES-DE compatible filename
+                new_path = self._esde_service.generate_rom_path(
+                    vimm_category=task.game.category,
+                    game_title=task.game.title,
+                    disc_number=task.disc.disc_number,
+                    extension=original_ext,
+                )
+                
+                # Extract to the new path
+                with zf.open(member) as source:
+                    self._filesystem.ensure_directory(new_path.parent)
+                    with open(new_path, 'wb') as target:
+                        target.write(source.read())
+                
+                log.debug(
+                    "Extracted ROM with ES-DE naming",
+                    original=original_name,
+                    new_name=new_path.name,
+                )
+            else:
+                # Extract non-ROM files (like .cue files) with original names
+                # but in the correct directory
+                target_path = extract_dir / original_name
+                with zf.open(member) as source:
+                    with open(target_path, 'wb') as target:
+                        target.write(source.read())
+                
+                log.debug(
+                    "Extracted supporting file",
+                    filename=original_name,
+                )
+
+    async def _extract_and_cleanup_7z(self, task: DownloadTask) -> None:
+        """Extract a 7z file and remove the archive.
+        
+        For ES-DE mode, extracted files are renamed to match the game title
+        with proper disc numbering for multi-disc games.
+        
+        Args:
+            task: The download task with 7z file to extract
+        """
+        archive_path = task.destination
+        
+        # Determine extraction directory
+        if self._esde_mode and self._esde_service:
+            extract_dir = self._esde_service.generate_extraction_directory(
+                vimm_category=task.game.category,
+                game_title=task.game.title,
+                disc_number=task.disc.disc_number,
+            )
+        else:
+            extract_dir = archive_path.parent
+        
+        log.info(
+            "Extracting 7z archive",
+            task_id=task.task_id,
+            archive_path=str(archive_path),
+            extract_dir=str(extract_dir),
+            esde_mode=self._esde_mode,
+        )
+        
+        try:
+            with py7zr.SevenZipFile(archive_path, mode='r') as archive:
+                file_list = archive.getnames()
+                
+                if self._esde_mode and self._esde_service:
+                    # ES-DE mode: extract to temp then rename
+                    await self._extract_7z_with_esde_naming(archive, task, extract_dir)
+                else:
+                    # Legacy mode: extract as-is
+                    archive.extractall(path=extract_dir)
+            
+            log.info(
+                "7z extraction completed",
+                task_id=task.task_id,
+                files_extracted=len(file_list),
+            )
+            
+            # Remove the 7z archive
+            archive_path.unlink()
+            log.info(
+                "7z archive removed",
+                task_id=task.task_id,
+                archive_path=str(archive_path),
+            )
+            
+        except py7zr.Bad7zFile as e:
+            log.error(
+                "Failed to extract 7z - invalid archive",
+                task_id=task.task_id,
+                error=str(e),
+            )
+            # Don't fail the download, just leave the 7z file
+        except Exception as e:
+            log.error(
+                "Failed to extract 7z",
+                task_id=task.task_id,
+                error=str(e),
+            )
+            # Don't fail the download, just leave the 7z file
+    
+    async def _extract_7z_with_esde_naming(
+        self,
+        archive: py7zr.SevenZipFile,
+        task: DownloadTask,
+        extract_dir: Path,
+    ) -> None:
+        """Extract 7z contents with ES-DE compatible naming.
+        
+        Args:
+            archive: Open SevenZipFile object
+            task: The download task
+            extract_dir: Directory to extract files to
+        """
+        if not self._esde_service:
+            return
+        
+        # Ensure extraction directory exists
+        self._filesystem.ensure_directory(extract_dir)
+        
+        # Get expected extensions for this system
+        expected_extensions = self._esde_service.get_expected_extensions(task.game.category)
+        
+        # Extract to a temp directory first, then rename
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_path = Path(temp_dir)
+            archive.extractall(path=temp_path)
+            
+            # Process extracted files
+            for extracted_file in temp_path.rglob('*'):
+                if extracted_file.is_dir():
+                    continue
+                
+                original_name = extracted_file.name
+                original_ext = extracted_file.suffix.lower()
+                
+                # Check if this is a ROM file we should rename
+                is_rom_file = original_ext in expected_extensions or original_ext in (
+                    '.iso', '.bin', '.cue', '.chd', '.rvz', '.gcz', '.wbfs', '.ciso',
+                    '.nds', '.gba', '.gbc', '.gb', '.nes', '.sfc', '.smc',
+                    '.n64', '.z64', '.v64', '.md', '.gen', '.sms', '.gg',
+                    '.pce', '.ngp', '.ngc', '.vb', '.a26', '.a52', '.a78',
+                    '.j64', '.jag', '.lnx', '.32x', '.cdi', '.gdi',
+                )
+                
+                if is_rom_file:
+                    # Generate ES-DE compatible filename
+                    new_path = self._esde_service.generate_rom_path(
+                        vimm_category=task.game.category,
+                        game_title=task.game.title,
+                        disc_number=task.disc.disc_number,
+                        extension=original_ext,
+                    )
+                    
+                    # Move to the new path
+                    self._filesystem.ensure_directory(new_path.parent)
+                    shutil.move(str(extracted_file), str(new_path))
+                    
+                    log.debug(
+                        "Extracted ROM with ES-DE naming",
+                        original=original_name,
+                        new_name=new_path.name,
+                    )
+                else:
+                    # Move non-ROM files with original names
+                    target_path = extract_dir / original_name
+                    shutil.move(str(extracted_file), str(target_path))
+                    
+                    log.debug(
+                        "Extracted supporting file",
+                        filename=original_name,
+                    )
 
     
     async def _download_with_progress(self, task: DownloadTask, start_time: float) -> None:
         """Download a file with progress tracking.
+        
+        Vimm's Lair requires a GET request to dl3.vimm.net with mediaId as query param,
+        plus proper Referer header to pass bot protection.
         
         Args:
             task: The download task
@@ -366,11 +700,86 @@ class DownloadManagerService:
         last_update_time = start_time
         last_bytes = 0
         
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0), follow_redirects=True) as client:
-            async with client.stream("GET", task.disc.download_url) as response:
+        # Use the download URL from the disc info (includes correct server like dl2 or dl3)
+        # Parse the URL to extract base and mediaId for proper request
+        download_url = task.disc.download_url
+        
+        # Required headers to pass bot protection
+        headers = {
+            "Referer": task.game.game_url,
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        }
+        
+        log.debug(
+            "Initiating download request",
+            url=download_url,
+            media_id=task.disc.media_id,
+        )
+        
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(300.0, connect=30.0),  # Longer timeout for large files
+            follow_redirects=True,
+            verify=False,  # Disable SSL verification for compatibility
+        ) as client:
+            async with client.stream("GET", download_url, headers=headers) as response:
                 response.raise_for_status()
                 
+                # Check content type - Vimm's Lair returns HTML for errors
+                content_type = response.headers.get("content-type", "")
+                if "text/html" in content_type.lower():
+                    raise ValueError(
+                        "Server returned HTML instead of file - likely rate limited or invalid request"
+                    )
+                
                 task.total_bytes = int(response.headers.get("content-length", 0))
+                
+                # Try to get filename from Content-Disposition header
+                content_disposition = response.headers.get("content-disposition", "")
+                if "filename=" in content_disposition:
+                    # Extract filename to get the actual extension
+                    match = re.search(r'filename="?([^";\n]+)"?', content_disposition)
+                    if match:
+                        server_filename = match.group(1)
+                        server_ext = Path(server_filename).suffix.lower()
+                        
+                        # Update destination with correct extension while preserving ES-DE naming
+                        if self._esde_mode and self._esde_service:
+                            # Regenerate path with correct extension
+                            task.destination = self._esde_service.generate_rom_path(
+                                vimm_category=task.game.category,
+                                game_title=task.game.title,
+                                disc_number=task.disc.disc_number,
+                                extension=server_ext,
+                            )
+                        else:
+                            # Legacy mode: just use the server filename
+                            task.destination = task.destination.parent / server_filename
+                        
+                        log.debug(
+                            "Updated destination from Content-Disposition",
+                            server_filename=server_filename,
+                            new_destination=str(task.destination),
+                        )
+                else:
+                    # No Content-Disposition header - check if it's a known archive type
+                    # by content-type or assume based on the response
+                    if "application/x-7z-compressed" in content_type.lower():
+                        # Update extension to .7z
+                        if self._esde_mode and self._esde_service:
+                            task.destination = self._esde_service.generate_rom_path(
+                                vimm_category=task.game.category,
+                                game_title=task.game.title,
+                                disc_number=task.disc.disc_number,
+                                extension=".7z",
+                            )
+                        else:
+                            task.destination = task.destination.with_suffix(".7z")
+                        
+                        log.debug(
+                            "Updated destination from content-type",
+                            content_type=content_type,
+                            new_destination=str(task.destination),
+                        )
                 
                 with open(task.destination, "wb") as f:
                     async for chunk in response.aiter_bytes(self._chunk_size):
@@ -461,11 +870,7 @@ class DownloadManagerService:
         self._cancel_event.set()
         self._is_running = False
         
-        # Cancel active async tasks
-        for task_id, async_task in self._active_downloads.items():
-            async_task.cancel()
-        
-        # Update status of active tasks
+        # Update status of pending/active tasks
         for task in self._queue:
             if task.status in (DownloadStatus.DOWNLOADING, DownloadStatus.PENDING, DownloadStatus.PAUSED):
                 task.status = DownloadStatus.CANCELLED
@@ -537,6 +942,48 @@ class DownloadManagerService:
     def is_running(self) -> bool:
         """Check if download processing is running."""
         return self._is_running
+
+    
+    async def _detect_archive_type(self, path: Path) -> str | None:
+        """Detect the actual archive type by reading file magic bytes.
+        
+        Args:
+            path: Path to the file to check
+            
+        Returns:
+            Archive type string ('zip', '7z') or None if not an archive
+        """
+        if not path.exists():
+            return None
+        
+        try:
+            with open(path, "rb") as f:
+                magic_bytes = f.read(8)
+            
+            # ZIP magic: PK (0x50 0x4B)
+            if magic_bytes[:2] == b'PK':
+                return "zip"
+            
+            # 7z magic: 7z¼¯' (0x37 0x7A 0xBC 0xAF 0x27 0x1C)
+            if magic_bytes[:6] == b'7z\xbc\xaf\x27\x1c':
+                return "7z"
+            
+            # Check file extension as fallback
+            suffix = path.suffix.lower()
+            if suffix == '.zip':
+                return "zip"
+            elif suffix == '.7z':
+                return "7z"
+            
+            return None
+            
+        except Exception as e:
+            log.warning(
+                "Failed to detect archive type",
+                path=str(path),
+                error=str(e),
+            )
+            return None
 
     
     async def _verify_checksum(self, task: DownloadTask) -> bool:

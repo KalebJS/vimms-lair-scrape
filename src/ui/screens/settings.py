@@ -183,6 +183,21 @@ class SettingsScreen(BaseScreen):
                         id="hint-concurrent",
                     )
                 
+                # Concurrent Scrapes
+                with Vertical(classes="form-group"):
+                    yield Label("Concurrent Scrapes:", classes="form-label")
+                    yield Input(
+                        placeholder="3",
+                        id="input-concurrent-scrapes",
+                        classes="form-input",
+                        type="integer",
+                    )
+                    yield Static(
+                        "Number of simultaneous metadata requests (1-10)",
+                        classes="form-hint",
+                        id="hint-concurrent-scrapes",
+                    )
+                
                 # Request Delay
                 with Vertical(classes="form-group"):
                     yield Label("Request Delay (seconds):", classes="form-label")
@@ -211,6 +226,21 @@ class SettingsScreen(BaseScreen):
                         "Logging verbosity level",
                         classes="form-hint",
                         id="hint-log-level",
+                    )
+                
+                # Minimum Score Filter
+                with Vertical(classes="form-group"):
+                    yield Label("Minimum Score (optional):", classes="form-label")
+                    yield Input(
+                        placeholder="Leave empty to disable",
+                        id="input-min-score",
+                        classes="form-input",
+                        type="number",
+                    )
+                    yield Static(
+                        "Only scrape games with rating >= this value (0-100)",
+                        classes="form-hint",
+                        id="hint-min-score",
                     )
             
             # Validation status
@@ -268,6 +298,10 @@ class SettingsScreen(BaseScreen):
         concurrent_input = self.query_one("#input-concurrent", Input)
         concurrent_input.value = str(config.concurrent_downloads)
         
+        # Concurrent scrapes
+        concurrent_scrapes_input = self.query_one("#input-concurrent-scrapes", Input)
+        concurrent_scrapes_input.value = str(config.concurrent_scrapes)
+        
         # Request delay
         delay_input = self.query_one("#input-delay", Input)
         delay_input.value = str(config.request_delay)
@@ -275,6 +309,10 @@ class SettingsScreen(BaseScreen):
         # Log level - use type ignore for Select generic type
         log_select = self.query_one("#select-log-level", Select)  # type: ignore[type-arg]
         log_select.value = config.log_level
+        
+        # Minimum score
+        min_score_input = self.query_one("#input-min-score", Input)
+        min_score_input.value = str(config.minimum_score) if config.minimum_score is not None else ""
         
         self._has_changes = False
         self._update_validation_status()
@@ -287,8 +325,10 @@ class SettingsScreen(BaseScreen):
             "target_letters": self.query_one("#input-target-letters", Input).value,
             "download_directory": self.query_one("#input-download-dir", Input).value,
             "concurrent_downloads": self.query_one("#input-concurrent", Input).value,
+            "concurrent_scrapes": self.query_one("#input-concurrent-scrapes", Input).value,
             "request_delay": self.query_one("#input-delay", Input).value,
             "log_level": str(log_value) if log_value else "INFO",
+            "minimum_score": self.query_one("#input-min-score", Input).value,
         }
     
     def _validate_form(self) -> tuple[bool, dict[str, str]]:
@@ -330,6 +370,20 @@ class SettingsScreen(BaseScreen):
             except ValueError:
                 errors["concurrent_downloads"] = "Must be a valid integer"
         
+        # Validate concurrent scrapes
+        concurrent_scrapes_str = values["concurrent_scrapes"].strip()
+        if not concurrent_scrapes_str:
+            errors["concurrent_scrapes"] = "Concurrent scrapes is required"
+        else:
+            try:
+                concurrent_scrapes = int(concurrent_scrapes_str)
+                if concurrent_scrapes < 1:
+                    errors["concurrent_scrapes"] = "Must be at least 1"
+                elif concurrent_scrapes > 10:
+                    errors["concurrent_scrapes"] = "Cannot exceed 10"
+            except ValueError:
+                errors["concurrent_scrapes"] = "Must be a valid integer"
+        
         # Validate request delay
         delay_str = values["request_delay"].strip()
         if not delay_str:
@@ -349,6 +403,18 @@ class SettingsScreen(BaseScreen):
         valid_levels = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
         if log_level not in valid_levels:
             errors["log_level"] = f"Must be one of: {', '.join(valid_levels)}"
+        
+        # Validate minimum score (optional)
+        min_score_str = values["minimum_score"].strip()
+        if min_score_str:  # Only validate if provided
+            try:
+                min_score = float(min_score_str)
+                if min_score < 0:
+                    errors["minimum_score"] = "Cannot be negative"
+                elif min_score > 100:
+                    errors["minimum_score"] = "Cannot exceed 100"
+            except ValueError:
+                errors["minimum_score"] = "Must be a valid number"
         
         self._validation_errors = errors
         return len(errors) == 0, errors
@@ -384,12 +450,20 @@ class SettingsScreen(BaseScreen):
         # Parse target letters
         letters = [l.strip().upper() for l in values["target_letters"].split(",") if l.strip()]
         
+        # Parse minimum score (optional)
+        min_score_str = values["minimum_score"].strip()
+        minimum_score: float | None = None
+        if min_score_str:
+            minimum_score = float(min_score_str)
+        
         return AppConfig(
             target_letters=letters,
             download_directory=Path(values["download_directory"]),
             concurrent_downloads=int(values["concurrent_downloads"]),
             request_delay=float(values["request_delay"]),
             log_level=values["log_level"],
+            minimum_score=minimum_score,
+            concurrent_scrapes=int(values["concurrent_scrapes"]),
         )
     
     async def on_input_changed(self, event: Input.Changed) -> None:

@@ -7,7 +7,7 @@ from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Container, Horizontal, Vertical
 from textual.message import Message
-from textual.widgets import Button, Input, Label, ProgressBar, Static
+from textual.widgets import Button, Checkbox, Input, Label, ProgressBar, Static
 from textual.worker import Worker, WorkerState
 
 import structlog
@@ -214,6 +214,7 @@ class ScrapingScreen(BaseScreen):
     _scraping_worker: Worker[None] | None
     _is_scraping: bool
     _errors: list[str]
+    _auto_queue: bool
     
     def __init__(self) -> None:
         """Initialize the scraping screen."""
@@ -222,6 +223,7 @@ class ScrapingScreen(BaseScreen):
         self._scraping_worker = None
         self._is_scraping = False
         self._errors = []
+        self._auto_queue = True
     
     @override
     def compose(self) -> ComposeResult:
@@ -255,6 +257,18 @@ class ScrapingScreen(BaseScreen):
                     )
                     yield Static(
                         "Game category to scrape",
+                        classes="form-hint",
+                    )
+                
+                # Auto-queue checkbox
+                with Vertical(classes="form-group"):
+                    yield Checkbox(
+                        "Auto-add to download queue",
+                        id="checkbox-auto-queue",
+                        value=True,
+                    )
+                    yield Static(
+                        "If unchecked, view scraped games in Data View to queue manually",
                         classes="form-hint",
                     )
             
@@ -299,6 +313,11 @@ class ScrapingScreen(BaseScreen):
         """Populate form fields from configuration."""
         letters_input = self.query_one("#input-letters", Input)
         letters_input.value = ", ".join(config.target_letters)
+        
+        # Set auto-queue checkbox from config
+        auto_queue_checkbox = self.query_one("#checkbox-auto-queue", Checkbox)
+        auto_queue_checkbox.value = config.auto_queue_downloads
+        self._auto_queue = config.auto_queue_downloads
     
     def _get_target_letters(self) -> list[str]:
         """Get target letters from form input."""
@@ -329,6 +348,12 @@ class ScrapingScreen(BaseScreen):
             await self._cancel_scraping()
         elif button_id == "btn-back":
             await self.action_go_back()
+    
+    def on_checkbox_changed(self, event: Checkbox.Changed) -> None:
+        """Handle checkbox state changes."""
+        if event.checkbox.id == "checkbox-auto-queue":
+            self._auto_queue = event.value
+            log.debug("Auto-queue setting changed", auto_queue=self._auto_queue)
     
     async def _start_scraping(self) -> None:
         """Start the scraping operation."""
@@ -361,8 +386,14 @@ class ScrapingScreen(BaseScreen):
             self._scraper = self.game_app.game_scraper
         else:
             # Fallback: create a new scraper if not available from context
-            http_client = HttpClientService()
-            self._scraper = GameScraperService(http_client, request_delay=2.0)
+            http_client = HttpClientService(verify_ssl=False)
+            config = self.game_app.app_state.current_config
+            minimum_score = config.minimum_score if config else None
+            self._scraper = GameScraperService(
+                http_client,
+                request_delay=2.0,
+                minimum_score=minimum_score,
+            )
         
         # Start scraping in a worker
         self._scraping_worker = self.run_worker(
@@ -427,11 +458,38 @@ class ScrapingScreen(BaseScreen):
             self._update_errors(event.errors)
     
     def on_scraping_screen_game_scraped(self, event: GameScraped) -> None:
-        """Handle game scraped messages."""
+        """Handle game scraped messages.
+        
+        Stores the game data and optionally adds it to the download queue
+        based on the auto-queue checkbox setting.
+        """
         try:
+            # Store game data in app state
             current_games = dict(self.game_app.app_state.games_data)
             current_games[event.game_data.game_url] = event.game_data
             self.game_app.update_games_data(current_games)
+            
+            # Add to download queue only if auto-queue is enabled
+            if self._auto_queue:
+                download_manager = self.game_app.download_manager
+                if download_manager:
+                    for disc in event.game_data.discs:
+                        download_manager.add_to_queue(event.game_data, disc)
+                    
+                    # Update app state with new queue
+                    self.game_app.update_download_queue(download_manager.get_all_tasks())
+                    
+                    log.debug(
+                        "Game added to download queue",
+                        title=event.game_data.title,
+                        discs=len(event.game_data.discs),
+                    )
+            else:
+                log.debug(
+                    "Game scraped (auto-queue disabled)",
+                    title=event.game_data.title,
+                )
+            
         except Exception as e:
             log.error("Failed to store game data", error=str(e))
     
@@ -440,12 +498,19 @@ class ScrapingScreen(BaseScreen):
         self._is_scraping = False
         self._update_ui_for_scraping(False)
         
+        # Get queue count
+        queue_count = 0
+        if self.game_app.download_manager:
+            queue_count = len(self.game_app.download_manager.get_all_tasks())
+        
         error_count = len(event.errors)
+        queue_info = f", {queue_count} in download queue" if self._auto_queue else ""
+        
         if error_count > 0:
             self._update_progress_display(
                 status=f"✓ Completed with {error_count} errors",
                 progress=100,
-                details=f"Successfully scraped {event.games_scraped} games",
+                details=f"Scraped {event.games_scraped} games{queue_info}",
                 current_game=""
             )
             self.notify_warning(f"Scraping completed with {error_count} errors")
@@ -453,12 +518,21 @@ class ScrapingScreen(BaseScreen):
             self._update_progress_display(
                 status="✓ Scraping completed successfully!",
                 progress=100,
-                details=f"Scraped {event.games_scraped} games",
+                details=f"Scraped {event.games_scraped} games{queue_info}",
                 current_game=""
             )
-            self.notify_success(f"Successfully scraped {event.games_scraped} games")
+            if self._auto_queue:
+                self.notify_success(f"Scraped {event.games_scraped} games → queued for download")
+            else:
+                self.notify_success(f"Scraped {event.games_scraped} games → view in Data View to queue")
         
-        log.info("Scraping completed", games_scraped=event.games_scraped, errors=error_count)
+        log.info(
+            "Scraping completed",
+            games_scraped=event.games_scraped,
+            queue_count=queue_count,
+            auto_queue=self._auto_queue,
+            errors=error_count,
+        )
     
     def on_scraping_screen_scraping_error(self, event: ScrapingError) -> None:
         """Handle scraping error."""
@@ -502,11 +576,13 @@ class ScrapingScreen(BaseScreen):
         cancel_btn = self.query_one("#btn-cancel", Button)
         letters_input = self.query_one("#input-letters", Input)
         category_input = self.query_one("#input-category", Input)
+        auto_queue_checkbox = self.query_one("#checkbox-auto-queue", Checkbox)
         
         start_btn.disabled = is_scraping
         cancel_btn.disabled = not is_scraping
         letters_input.disabled = is_scraping
         category_input.disabled = is_scraping
+        auto_queue_checkbox.disabled = is_scraping
         
         # Update app state
         self.game_app.set_scraping_active(is_scraping)

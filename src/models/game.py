@@ -21,3 +21,5 @@ class GameData:
     category: str
     discs: list[DiscInfo]
     scraped_at: datetime
+    rating: float | None = None  # 0-100 scale, None if not available
+    rating_count: int | None = None  # Number of ratings/votes

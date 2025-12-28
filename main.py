@@ -5,7 +5,7 @@ import re
 import json
 
 # Base URLs
-site_base_url = "https://vimm.net/vault/Xbox"
+site_base_url = "https://vimm.net/vault/GBC"
 download_base_url = "https://download2.vimm.net"
 
 # Define the letters (J to Q) to scrape
@@ -29,7 +29,7 @@ def scrape_data():
         page_url = f"{site_base_url}/{letter}"
         print(f"Scraping page: {page_url}")
         
-        response = requests.get(page_url)
+        response = requests.get(page_url, verify=False)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'html.parser')
 
@@ -52,7 +52,7 @@ def scrape_data():
                         "discs": []
                     }
                     
-                    game_page_response = requests.get(full_game_url)
+                    game_page_response = requests.get(full_game_url, verify=False)
                     game_soup = BeautifulSoup(game_page_response.text, 'html.parser')
                     
                     # Check for disc selector dropdown and media IDs in JavaScript
@@ -105,7 +105,7 @@ def download_disc(download_url, game_title, disc_number):
     }
     try:
         print(f"Downloading {game_title} - {disc_number} from {download_url}")
-        response = requests.get(download_url, headers=headers, stream=True)
+        response = requests.get(download_url, headers=headers, stream=True, verify=False)
         response.raise_for_status()
         
         # Save the downloaded file

@@ -21,7 +21,8 @@ class HttpClientService:
         max_retries: int = 3,
         base_delay: float = 1.0,
         max_delay: float = 60.0,
-        rate_limit_delay: float = 1.0
+        rate_limit_delay: float = 1.0,
+        verify_ssl: bool = True
     ) -> None:
         """Initialize the HTTP client service.
         
@@ -31,6 +32,7 @@ class HttpClientService:
             base_delay: Base delay for exponential backoff in seconds
             max_delay: Maximum delay between retries in seconds
             rate_limit_delay: Minimum delay between requests in seconds
+            verify_ssl: Whether to verify SSL certificates (disable for macOS cert issues)
         """
         self.timeout = timeout
         self.max_retries = max_retries
@@ -46,14 +48,16 @@ class HttpClientService:
                 "User-Agent": "TUI-Game-Scraper/1.0 (Educational Purpose)"
             },
             follow_redirects=True,
-            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20)
+            limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
+            verify=verify_ssl
         )
         
         log.info(
             "HTTP client service initialized",
             timeout=timeout,
             max_retries=max_retries,
-            rate_limit_delay=rate_limit_delay
+            rate_limit_delay=rate_limit_delay,
+            verify_ssl=verify_ssl
         )
     
     async def get(

@@ -91,7 +91,7 @@ def test_queue_management_total_tasks(games: list[GameData]) -> None:
         http_client=mock_http_client,
         filesystem=mock_filesystem,
         download_directory=Path("/tmp/downloads"),
-        concurrent_downloads=3
+        
     )
     
     # Add all games to queue
@@ -129,7 +129,7 @@ def test_queue_management_individual_progress(games: list[GameData]) -> None:
         http_client=mock_http_client,
         filesystem=mock_filesystem,
         download_directory=Path("/tmp/downloads"),
-        concurrent_downloads=3
+        
     )
     
     # Add all games to queue
@@ -156,7 +156,8 @@ def test_queue_management_individual_progress(games: list[GameData]) -> None:
         
         # Property: Task has valid destination path
         assert task.destination.suffix == ".zip"
-        assert task.game.category in str(task.destination)
+        # ES-DE mode uses system-specific folder names under the download directory
+        assert str(task.destination).startswith("/tmp/downloads/")
 
 
 @given(st.lists(game_data_strategy(), min_size=1, max_size=5))
@@ -174,7 +175,7 @@ def test_queue_management_total_bytes(games: list[GameData]) -> None:
         http_client=mock_http_client,
         filesystem=mock_filesystem,
         download_directory=Path("/tmp/downloads"),
-        concurrent_downloads=3
+        
     )
     
     # Add all games to queue
@@ -212,7 +213,7 @@ def test_queue_management_task_lookup(game: GameData) -> None:
         http_client=mock_http_client,
         filesystem=mock_filesystem,
         download_directory=Path("/tmp/downloads"),
-        concurrent_downloads=3
+        
     )
     
     # Add game to queue
@@ -250,7 +251,7 @@ def test_queue_management_remove_task(games: list[GameData]) -> None:
         http_client=mock_http_client,
         filesystem=mock_filesystem,
         download_directory=Path("/tmp/downloads"),
-        concurrent_downloads=3
+        
     )
     
     # Add all games to queue
@@ -293,7 +294,7 @@ def test_pause_resume_round_trip_state(games: list[GameData]) -> None:
         http_client=mock_http_client,
         filesystem=mock_filesystem,
         download_directory=Path("/tmp/downloads"),
-        concurrent_downloads=3
+        
     )
     
     # Add games to queue
@@ -328,7 +329,7 @@ def test_pause_resume_idempotent(games: list[GameData]) -> None:
         http_client=mock_http_client,
         filesystem=mock_filesystem,
         download_directory=Path("/tmp/downloads"),
-        concurrent_downloads=3
+        
     )
     
     # Add games to queue
@@ -369,7 +370,7 @@ def test_pause_resume_multiple_cycles(games: list[GameData], num_cycles: int) ->
         http_client=mock_http_client,
         filesystem=mock_filesystem,
         download_directory=Path("/tmp/downloads"),
-        concurrent_downloads=3
+        
     )
     
     # Add games to queue
@@ -404,7 +405,7 @@ def test_pause_preserves_queue(games: list[GameData]) -> None:
         http_client=mock_http_client,
         filesystem=mock_filesystem,
         download_directory=Path("/tmp/downloads"),
-        concurrent_downloads=3
+        
     )
     
     # Add games to queue
@@ -439,7 +440,7 @@ def test_pause_preserves_progress(games: list[GameData]) -> None:
         http_client=mock_http_client,
         filesystem=mock_filesystem,
         download_directory=Path("/tmp/downloads"),
-        concurrent_downloads=3
+        
     )
     
     # Add games to queue
@@ -478,7 +479,7 @@ def test_file_integrity_verification() -> None:
         http_client=mock_http_client,
         filesystem=mock_filesystem,
         download_directory=Path("/tmp/downloads"),
-        concurrent_downloads=3
+        
     )
     
     # Create a test file with known content
@@ -545,7 +546,7 @@ def test_retry_failed_download() -> None:
         http_client=mock_http_client,
         filesystem=mock_filesystem,
         download_directory=Path("/tmp/downloads"),
-        concurrent_downloads=3
+        
     )
     
     # Create a game and add to queue
@@ -596,7 +597,7 @@ def test_completion_status_tracking() -> None:
         http_client=mock_http_client,
         filesystem=mock_filesystem,
         download_directory=Path("/tmp/downloads"),
-        concurrent_downloads=3
+        
     )
     
     # Create multiple games

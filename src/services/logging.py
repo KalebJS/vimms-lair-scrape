@@ -13,15 +13,22 @@ import structlog
 class LoggingService:
     """Service for configuring and managing application logging."""
     
-    def __init__(self, log_level: str = "INFO", log_dir: Path | None = None) -> None:
+    def __init__(
+        self, 
+        log_level: str = "INFO", 
+        log_dir: Path | None = None,
+        tui_mode: bool = False,
+    ) -> None:
         """Initialize the logging service.
         
         Args:
             log_level: The minimum log level to capture
             log_dir: Directory for log files (None for console only)
+            tui_mode: If True, disable console logging to avoid corrupting TUI
         """
         self.log_level = log_level.upper()
         self.log_dir = log_dir
+        self.tui_mode = tui_mode
         self.is_development = os.getenv("ENVIRONMENT", "development") == "development"
         
     def configure(self) -> None:
@@ -50,22 +57,23 @@ class LoggingService:
         numeric_level = getattr(logging, self.log_level, logging.INFO)
         root_logger.setLevel(numeric_level)
         
-        # Console handler (always present)
-        console_handler = logging.StreamHandler(sys.stdout)
-        console_handler.setLevel(numeric_level)
-        
-        if self.is_development:
-            # Development: use simple format for console
-            console_formatter = logging.Formatter(
-                fmt="%(asctime)s [%(levelname)8s] %(name)s: %(message)s",
-                datefmt="%H:%M:%S"
-            )
-        else:
-            # Production: use JSON format for console
-            console_formatter = logging.Formatter("%(message)s")
+        # Console handler (only when NOT in TUI mode)
+        if not self.tui_mode:
+            console_handler = logging.StreamHandler(sys.stdout)
+            console_handler.setLevel(numeric_level)
             
-        console_handler.setFormatter(console_formatter)
-        root_logger.addHandler(console_handler)
+            if self.is_development:
+                # Development: use simple format for console
+                console_formatter = logging.Formatter(
+                    fmt="%(asctime)s [%(levelname)8s] %(name)s: %(message)s",
+                    datefmt="%H:%M:%S"
+                )
+            else:
+                # Production: use JSON format for console
+                console_formatter = logging.Formatter("%(message)s")
+                
+            console_handler.setFormatter(console_formatter)
+            root_logger.addHandler(console_handler)
         
         # File handler (if log directory specified)
         if self.log_dir:
@@ -151,7 +159,8 @@ class LoggingService:
 def setup_logging(
     log_level: str = "INFO", 
     log_dir: Path | None = None,
-    environment: str | None = None
+    environment: str | None = None,
+    tui_mode: bool = False,
 ) -> LoggingService:
     """Set up application logging with the specified configuration.
     
@@ -159,6 +168,7 @@ def setup_logging(
         log_level: Minimum log level to capture
         log_dir: Directory for log files (None for console only)
         environment: Environment name (development/production)
+        tui_mode: If True, disable console logging to avoid corrupting TUI
         
     Returns:
         Configured LoggingService instance
@@ -166,6 +176,6 @@ def setup_logging(
     if environment:
         os.environ["ENVIRONMENT"] = environment
         
-    service = LoggingService(log_level=log_level, log_dir=log_dir)
+    service = LoggingService(log_level=log_level, log_dir=log_dir, tui_mode=tui_mode)
     service.configure()
     return service

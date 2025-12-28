@@ -23,8 +23,10 @@ valid_paths = st.builds(
 )
 
 valid_concurrent_downloads = st.integers(min_value=1, max_value=10)
+valid_concurrent_scrapes = st.integers(min_value=1, max_value=10)
 valid_request_delay = st.floats(min_value=0.0, max_value=60.0, allow_nan=False, allow_infinity=False)
 valid_log_levels = st.sampled_from(["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"])
+valid_minimum_score = st.one_of(st.none(), st.floats(min_value=0.0, max_value=100.0, allow_nan=False, allow_infinity=False))
 
 valid_config_strategy = st.builds(
     AppConfig,
@@ -32,7 +34,9 @@ valid_config_strategy = st.builds(
     download_directory=valid_paths,
     concurrent_downloads=valid_concurrent_downloads,
     request_delay=valid_request_delay,
-    log_level=valid_log_levels
+    log_level=valid_log_levels,
+    minimum_score=valid_minimum_score,
+    concurrent_scrapes=valid_concurrent_scrapes,
 )
 
 
@@ -60,6 +64,8 @@ def test_configuration_round_trip(config: AppConfig) -> None:
         assert loaded_config.concurrent_downloads == config.concurrent_downloads
         assert loaded_config.request_delay == config.request_delay
         assert loaded_config.log_level == config.log_level
+        assert loaded_config.minimum_score == config.minimum_score
+        assert loaded_config.concurrent_scrapes == config.concurrent_scrapes
 
 
 def test_configuration_round_trip_example() -> None:

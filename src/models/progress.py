@@ -11,6 +11,7 @@ class ScrapingProgress:
     games_processed: int
     total_games: int
     errors: list[str]
+    games_skipped: int = 0  # Games skipped due to low score
 
 
 @dataclass(frozen=True)

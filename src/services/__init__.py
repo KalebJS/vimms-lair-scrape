@@ -22,6 +22,7 @@ from .errors import (
     get_error_service,
     handle_error,
 )
+from .esde_compat import ESDECompatibilityService, SystemMapping, VIMM_TO_ESDE_MAPPING
 from .filesystem import FileSystemService
 from .http_client import HttpClientService
 
@@ -36,15 +37,18 @@ __all__ = [
     "ErrorCategory",
     "ErrorHandlingService",
     "ErrorSeverity",
+    "ESDECompatibilityService",
     "FileSystemError",
     "FileSystemService",
     "HttpClientService",
     "NetworkError",
     "QueueStatus",
     "ScrapingError",
+    "SystemMapping",
     "UserFriendlyError",
     "ValidationError",
     "ValidationResult",
+    "VIMM_TO_ESDE_MAPPING",
     "get_error_service",
     "handle_error",
 ]

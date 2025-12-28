@@ -34,7 +34,7 @@ class ConfigurationService:
         
         try:
             with open(self.config_path, 'r', encoding='utf-8') as f:
-                data: dict[str, str | int | float | list[str]] = json.load(f)
+                data: dict[str, str | int | float | list[str] | bool | None] = json.load(f)
             
             config = self._dict_to_config(data)
             validation_result = self.validate_config(config)
@@ -104,6 +104,19 @@ class ConfigurationService:
         if config.log_level not in valid_log_levels:
             errors.append(f"log_level must be one of: {', '.join(valid_log_levels)}")
         
+        # Validate minimum_score
+        if config.minimum_score is not None:
+            if not isinstance(config.minimum_score, (int, float)):
+                errors.append("minimum_score must be a number or None")
+            elif config.minimum_score < 0 or config.minimum_score > 100:
+                errors.append("minimum_score must be between 0 and 100")
+        
+        # Validate concurrent_scrapes
+        if not isinstance(config.concurrent_scrapes, int) or config.concurrent_scrapes < 1:
+            errors.append("concurrent_scrapes must be a positive integer")
+        elif config.concurrent_scrapes > 10:
+            errors.append("concurrent_scrapes should not exceed 10")
+        
         return ValidationResult(len(errors) == 0, errors)
     
     def _get_default_config(self) -> AppConfig:
@@ -111,27 +124,52 @@ class ConfigurationService:
         return AppConfig(
             target_letters=["A"],
             download_directory=Path.home() / "Downloads" / "games",
-            concurrent_downloads=3,
-            request_delay=1.0,
-            log_level="INFO"
+            concurrent_downloads=1,
+            request_delay=2.0,
+            log_level="INFO",
+            concurrent_scrapes=3,
+            auto_queue_downloads=True,
         )
     
-    def _config_to_dict(self, config: AppConfig) -> dict[str, str | int | float | list[str]]:
+    def _config_to_dict(self, config: AppConfig) -> dict[str, str | int | float | list[str] | bool | None]:
         """Convert AppConfig to dictionary for JSON serialization."""
         return {
             "target_letters": config.target_letters,
             "download_directory": str(config.download_directory),
             "concurrent_downloads": config.concurrent_downloads,
             "request_delay": config.request_delay,
-            "log_level": config.log_level
+            "log_level": config.log_level,
+            "minimum_score": config.minimum_score,
+            "concurrent_scrapes": config.concurrent_scrapes,
+            "auto_queue_downloads": config.auto_queue_downloads,
         }
     
-    def _dict_to_config(self, data: dict[str, str | int | float | list[str]]) -> AppConfig:
+    def _dict_to_config(self, data: dict[str, str | int | float | list[str] | bool | None]) -> AppConfig:
         """Convert dictionary to AppConfig."""
+        # Parse minimum_score - can be None, int, or float
+        min_score_raw = data.get("minimum_score")
+        minimum_score: float | None = None
+        if min_score_raw is not None and min_score_raw != "":
+            try:
+                minimum_score = float(min_score_raw)
+            except (ValueError, TypeError):
+                minimum_score = None
+        
+        # Parse concurrent_scrapes with default fallback
+        concurrent_scrapes_raw = data.get("concurrent_scrapes", 3)
+        concurrent_scrapes = int(concurrent_scrapes_raw) if isinstance(concurrent_scrapes_raw, (int, float)) else 3
+        
+        # Parse auto_queue_downloads with default fallback (True for backwards compatibility)
+        auto_queue_raw = data.get("auto_queue_downloads", True)
+        auto_queue_downloads = bool(auto_queue_raw) if isinstance(auto_queue_raw, bool) else True
+        
         return AppConfig(
             target_letters=data["target_letters"] if isinstance(data["target_letters"], list) else [],
             download_directory=Path(str(data["download_directory"])),
-            concurrent_downloads=int(data["concurrent_downloads"]) if isinstance(data["concurrent_downloads"], (int, float)) else 3,
-            request_delay=float(data["request_delay"]) if isinstance(data["request_delay"], (int, float)) else 1.0,
-            log_level=str(data["log_level"]) if isinstance(data["log_level"], str) else "INFO"
+            concurrent_downloads=int(data["concurrent_downloads"]) if isinstance(data["concurrent_downloads"], (int, float)) else 1,
+            request_delay=float(data["request_delay"]) if isinstance(data["request_delay"], (int, float)) else 2.0,
+            log_level=str(data["log_level"]) if isinstance(data["log_level"], str) else "INFO",
+            minimum_score=minimum_score,
+            concurrent_scrapes=concurrent_scrapes,
+            auto_queue_downloads=auto_queue_downloads,
         )
